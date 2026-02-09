@@ -108,7 +108,13 @@ flower \- flow based traffic control filter
 .BR cfm
 .IR CFM_OPTIONS " | "
 .BR enc_flags
-.IR ENCFLAG-LIST " }"
+.IR ENCFLAG-LIST " | "
+.BR mark
+.IR MASKED_MARK " | "
+.BR priority
+.IR MASKED_PRIORITY " | "
+.BR tc_index
+.IR MASKED_TC_INDEX " }"
 
 .ti -8
 .IR LSE_LIST " := [ " LSE_LIST " ] " LSE
@@ -418,8 +424,6 @@ bits is assumed.
 .BI enc_tos " NUMBER"
 .TQ
 .BI enc_ttl " NUMBER"
-.TQ
-.BR
 .TP
 .BI ct_state " CT_STATE"
 .TQ
@@ -459,6 +463,29 @@ Match the connection zone, and can be masked.
 .I CT_MASKED_LABEL
 128bit match on the connection label, and can be masked.
 .RE
+.TP
+.BI mark " MASKED_MARK"
+32-bit match on packet mark, which can be masked.
+.TP
+.BI priority " MASKED_PRIORITY"
+Match on the packet priority (skb->priority).
+The priority value may be specified either as a plain 32-bit integer
+(decimal or
+.RI 0x -prefixed
+hex, e.g.
+.BR 4097 " or " 0x1001 )
+or as a TC class handle in
+.IR MAJOR:MINOR
+hex format (e.g.
+.BR 1:1 ).
+An optional mask can be appended after a
+.B /
+separator using the same format as the value (e.g.
+.BR "priority 1:1/ffff:ffff" " or " "priority 0x1001/0xffff" ).
+The value and mask are stored and matched as 32-bit quantities.
+.TP
+.BI tc_index " MASKED_TC_INDEX"
+16-bit match on packet traffic class index, which can be masked.
 .TP
 .BI geneve_opts " OPTIONS"
 .TQ

@@ -104,7 +104,10 @@ static void explain(void)
 		"			ct_mark MASKED_CT_MARK |\n"
 		"			ct_zone MASKED_CT_ZONE |\n"
 		"			cfm CFM |\n"
-		"			enc_flags ENCFLAG-LIST }\n"
+		"			enc_flags ENCFLAG-LIST |\n"
+		"			mark MARK |\n"
+		"			priority PRIORITY[/MASK] (u32 or MAJOR:MINOR) |\n"
+		"			tc_index TC_INDEX }\n"
 		"	LSE-LIST := [ LSE-LIST ] LSE\n"
 		"	LSE := lse depth DEPTH { label LABEL | tc TC | bos BOS | ttl TTL }\n"
 		"	FILTERID := X:Y:Z\n"
@@ -315,6 +318,19 @@ static int flower_parse_u32(char *str, int value_type, int mask_type,
 	addattr32(n, MAX_MSG, mask_type, mask);
 
 	return 0;
+}
+
+/*
+ * Parse a single priority token which may be either a plain u32
+ * (decimal or 0x-prefixed hex, e.g. "4097" or "0x1001") or a TC class
+ * handle (MAJOR:MINOR hex, e.g. "1:1").  The presence of a colon is
+ * used to distinguish the two forms.
+ */
+static int flower_parse_priority_value(const char *str, __u32 *val)
+{
+	if (strchr(str, ':'))
+		return get_tc_classid(val, str);
+	return get_u32(val, str, 0);
 }
 
 static int flower_parse_ct_mark(char *str, struct nlmsghdr *n)
@@ -1636,6 +1652,42 @@ static int flower_parse_cfm(int *argc_p, char ***argv_p, __be16 eth_type,
 
 	return 0;
 }
+static int flower_parse_mark(char *str, struct nlmsghdr *n)
+{
+	return flower_parse_u32(str, TCA_FLOWER_KEY_SKB_MARK,
+				TCA_FLOWER_KEY_SKB_MARK_MASK, n);
+}
+
+static int flower_parse_priority(char *str, struct nlmsghdr *n)
+{
+	__u32 value, mask;
+	char *slash;
+
+	slash = strchr(str, '/');
+	if (slash)
+		*slash = '\0';
+
+	if (flower_parse_priority_value(str, &value))
+		return -1;
+
+	if (slash) {
+		if (flower_parse_priority_value(slash + 1, &mask))
+			return -1;
+	} else {
+		mask = UINT32_MAX;
+	}
+
+	addattr32(n, MAX_MSG, TCA_FLOWER_KEY_SKB_PRIORITY, value);
+	addattr32(n, MAX_MSG, TCA_FLOWER_KEY_SKB_PRIORITY_MASK, mask);
+
+	return 0;
+}
+
+static int flower_parse_tc_index(char *str, struct nlmsghdr *n)
+{
+	return flower_parse_u16(str, TCA_FLOWER_KEY_SKB_TCINDEX,
+				TCA_FLOWER_KEY_SKB_TCINDEX_MASK, n, false);
+}
 
 static int flower_parse_opt(const struct filter_util *qu, char *handle,
 			    int argc, char **argv, struct nlmsghdr *n)
@@ -2286,6 +2338,28 @@ static int flower_parse_opt(const struct filter_util *qu, char *handle,
 			if (ret < 0)
 				return -1;
 			continue;
+		} else if (!strcmp(*argv, "mark")) {
+			NEXT_ARG();
+			ret = flower_parse_mark(*argv, n);
+			if (ret < 0) {
+				fprintf(stderr, "Illegal \"mark\"\n");
+				return -1;
+			}
+		} else if (!strcmp(*argv, "priority")) {
+			NEXT_ARG();
+			ret = flower_parse_priority(*argv, n);
+			if (ret < 0) {
+				fprintf(stderr, "Illegal \"priority\"\n");
+				return -1;
+			}
+		} else if (!strcmp(*argv, "tc_index")) {
+			NEXT_ARG();
+			ret = flower_parse_tc_index(*argv, n);
+			if (ret < 0) {
+				fprintf(stderr, "Illegal \"tc_index\"\n");
+				return -1;
+			}
+
 		} else {
 			if (strcmp(*argv, "help") != 0)
 				fprintf(stderr, "What is \"%s\"?\n", *argv);
@@ -3050,6 +3124,49 @@ static void flower_print_cfm(struct rtattr *attr)
 	close_json_object();
 }
 
+static void flower_print_mark(struct rtattr *attr, struct rtattr *mask_attr)
+{
+	print_masked_u32("mark", attr, mask_attr, true);
+}
+
+static void flower_print_priority(struct rtattr *attr, struct rtattr *mask_attr)
+{
+	SPRINT_BUF(b1);
+	__u32 value, mask;
+
+	if (!attr)
+		return;
+
+	value = rta_getattr_u32(attr);
+	mask = mask_attr ? rta_getattr_u32(mask_attr) : UINT32_MAX;
+
+	print_string(PRINT_FP, NULL, "%s  ", _SL_);
+
+	/* Display as classid (MAJOR:MINOR) when the major part is set,
+	 * otherwise fall back to plain hex so that a u32 round-trips cleanly.
+	 */
+	if (TC_H_MAJ(value))
+		print_string(PRINT_ANY, "priority", "priority %s",
+			     sprint_tc_classid(value, b1));
+	else
+		print_uint(PRINT_ANY, "priority", "priority %u", value);
+
+	if (mask != UINT32_MAX) {
+		SPRINT_BUF(b2);
+
+		if (TC_H_MAJ(mask))
+			print_string(PRINT_ANY, "priority_mask", "/%s",
+				     sprint_tc_classid(mask, b2));
+		else
+			print_uint(PRINT_ANY, "priority_mask", "/%u", mask);
+	}
+}
+
+static void flower_print_tc_index(struct rtattr *attr, struct rtattr *mask_attr)
+{
+	print_masked_u16("tc_index", attr, mask_attr, true);
+}
+
 static int flower_print_opt(const struct filter_util *qu, FILE *f,
 			    struct rtattr *opt, __u32 handle)
 {
@@ -3319,6 +3436,13 @@ static int flower_print_opt(const struct filter_util *qu, FILE *f,
 			      tb[TCA_FLOWER_KEY_CT_LABELS_MASK]);
 
 	flower_print_cfm(tb[TCA_FLOWER_KEY_CFM]);
+
+	flower_print_mark(tb[TCA_FLOWER_KEY_SKB_MARK],
+			  tb[TCA_FLOWER_KEY_SKB_MARK_MASK]);
+	flower_print_priority(tb[TCA_FLOWER_KEY_SKB_PRIORITY],
+			      tb[TCA_FLOWER_KEY_SKB_PRIORITY_MASK]);
+	flower_print_tc_index(tb[TCA_FLOWER_KEY_SKB_TCINDEX],
+			      tb[TCA_FLOWER_KEY_SKB_TCINDEX_MASK]);
 
 	close_json_object();
 
